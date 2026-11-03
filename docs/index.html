@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Smart Mobility Le Mans — SETRAM network status</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+  .kpis { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
+  .kpi { flex: 1; min-width: 180px; padding: 0.8rem 1rem; border: 1px solid #ccc; border-radius: 8px; }
+  .kpi .value { font-size: 1.6rem; font-weight: bold; color: #0d7c9e; }
+  .kpi .label { font-size: 0.8rem; color: #666; }
+  #alerts { padding: 0.8rem 1rem; border: 2px solid #c46e0a; border-radius: 8px; background: #faf3e8; }
+  #alerts.none { border-color: #2c9c4a; background: #f0f8f2; }
+  canvas { margin-top: 2rem; }
+  #updated { color: #666; font-size: 0.85rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: 0.9rem; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #f3f3f3; }
+</style>
+</head>
+<body>
+  <h1>SETRAM network — current status</h1>
+  <p>Real-time delay and disruption snapshot for Le Mans Métropole's bus and tram network.</p>
+  <div class="kpis" id="kpis">Loading...</div>
+  <div id="alerts">Loading alerts...</div>
+  <canvas id="delayChart" height="320"></canvas>
+  <p id="updated"></p>
+
+  <h2>Transport supply vs population, by commune</h2>
+  <p id="supplyNote">Loading...</p>
+  <div id="supplyTable"></div>
+
+<script>
+fetch('data/current_state.json?t=' + Date.now())
+  .then(r => r.json())
+  .then(data => {
+    const routes = data.routes || [];
+
+    document.getElementById('kpis').innerHTML = `
+      <div class="kpi"><div class="value">${data.network_avg_delay_s.toFixed(1)}s</div><div class="label">Network average delay</div></div>
+      <div class="kpi"><div class="value">${data.n_routes_reporting}</div><div class="label">Routes reporting</div></div>
+      <div class="kpi"><div class="value">${data.alerts.length}</div><div class="label">Active alerts</div></div>
+    `;
+
+    document.getElementById('updated').textContent = `Data last updated ${data.generated_at}`;
+
+    const alertsEl = document.getElementById('alerts');
+    if (!data.alerts || data.alerts.length === 0) {
+      alertsEl.classList.add('none');
+      alertsEl.innerHTML = '<strong>No active alerts.</strong>';
+    } else {
+      alertsEl.innerHTML = '<strong>Active alerts:</strong><ul>' +
+        data.alerts.map(a => `<li>[Route ${a.routes || '?'}] ${a.header}</li>`).join('') +
+        '</ul>';
+    }
+
+    if (routes.length === 0) {
+      document.getElementById('delayChart').outerHTML =
+        '<p>No route data yet -- trigger the collect_snapshot workflow from the Actions tab.</p>';
+      return;
+    }
+
+    function scoreToColor(t) {
+      const clamped = Math.max(0, Math.min(1, t));
+      const hue = 120 * clamped;
+      return `hsl(${hue.toFixed(0)}, 70%, 45%)`;
+    }
+    function normalizeForColor(values, invert) {
+      const lo = Math.min(...values);
+      const hi = Math.max(...values);
+      if (hi === lo) return values.map(() => 0.5);
+      const scaled = values.map(v => (v - lo) / (hi - lo));
+      return invert ? scaled.map(s => 1 - s) : scaled;
+    }
+    const colorNorm = normalizeForColor(routes.map(r => r.avg_delay_s), true);
+    const barColors = colorNorm.map(t => scoreToColor(t));
+
+    new Chart(document.getElementById('delayChart'), {
+      type: 'bar',
+      data: {
+        labels: routes.map(r => r.route_name),
+        datasets: [{
+          label: 'Average delay (s)',
+          data: routes.map(r => r.avg_delay_s),
+          backgroundColor: barColors
+        }]
+      },
+      options: {
+        plugins: {
+          legend: { display: false },
+          title: { display: true, text: 'Average delay by route, this snapshot (green = on time/early, red = most delayed)' },
+          tooltip: {
+            callbacks: {
+              title: (items) => `Route ${routes[items[0].dataIndex].route_name}`,
+              label: (item) => {
+                const r = routes[item.dataIndex];
+                return [`Avg delay: ${r.avg_delay_s}s`, `Trips observed: ${r.n_trips_observed}`, `Skipped stops: ${r.n_skipped}`];
+              }
+            }
+          }
+        },
+        scales: { y: { title: { display: true, text: 'Average delay (seconds)' } } }
+      }
+    });
+  })
+  .catch(err => {
+    document.getElementById('kpis').innerHTML =
+      '<p>Could not load network status (' + err + ').</p>';
+  });
+
+fetch('data/commune_supply.json?t=' + Date.now())
+  .then(r => { if (!r.ok) throw new Error('not generated yet'); return r.json(); })
+  .then(data => {
+    document.getElementById('supplyNote').textContent =
+      `Metric: ${data.metric} (representative weekday, service ${data.service_id}). ` +
+      `Population is only a proxy for demand.`;
+    const rows = data.communes.map(c => `
+      <tr><td>${c.commune}</td><td>${c.population.toLocaleString()}</td><td>${c.n_stops}</td>
+      <td>${c.daily_stop_visits.toLocaleString()}</td><td><strong>${c.visits_per_1000_residents}</strong></td></tr>`).join('');
+    document.getElementById('supplyTable').innerHTML = `
+      <table>
+        <tr><th>Commune</th><th>Population</th><th>Stops</th><th>Stop-visits / weekday</th><th>Per 1,000 residents</th></tr>
+        ${rows}
+      </table>`;
+  })
+  .catch(() => {
+    document.getElementById('supplyNote').textContent =
+      'No supply data yet -- run the "Build static reference" workflow from the Actions tab.';
+  });
+</script>
+</body>
+</html>
